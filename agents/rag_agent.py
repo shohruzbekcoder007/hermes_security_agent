@@ -974,15 +974,20 @@ class RAGAgentService:
 
             count = self._chunk_count()
             if count <= 0:
+                # success=true so Open WebUI gateway (api_style=message) shows
+                # the message instead of converting success=false → HTTP 502.
                 return {
-                    "success": False,
+                    "success": True,
                     "response": (
                         "Hujjat indeksi bo'sh. PDF/Word fayllarni data/docs ga "
                         "qo'ying va POST /v1/docs/reindex chaqiring."
                     ),
-                    "error": "empty_index",
+                    "error": None,
                     "error_code": "empty_index",
                     "sources": [],
+                    "agents_used": ["rag_agent"],
+                    "mode": "empty_index",
+                    "backend": "rag",
                 }
 
             if not self._profiles:

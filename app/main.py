@@ -1,5 +1,5 @@
 """
-Process entrypoint for the LangChain SQLAgent service.
+Process entrypoint for the document RAG service.
 
 Usage:
   python -m app.main
@@ -37,7 +37,7 @@ def main() -> None:
     logger = logging.getLogger("app")
 
     bind_host = (os.getenv("APP_HOST") or "0.0.0.0").strip() or "0.0.0.0"
-    port = int(os.getenv("APP_PORT") or "8080")
+    port = int(os.getenv("APP_PORT") or "9000")
     workers = int(os.getenv("API_WORKERS") or "1")
     reload = os.getenv("API_RELOAD", "false").strip().lower() in {
         "1",
@@ -46,7 +46,7 @@ def main() -> None:
     }
 
     logger.info("=" * 60)
-    logger.info("Hermes host + SQL tool — server starting (Variant 2)")
+    logger.info("Document RAG service starting")
     logger.info(
         "Bind=%s Port=%s Workers=%s Reload=%s",
         bind_host,
@@ -55,20 +55,21 @@ def main() -> None:
         reload,
     )
     logger.info("LLM_MODEL=%s", os.getenv("LLM_MODEL", "gpt-4.1"))
-    logger.info(
-        "DATABASE_URL configured=%s",
-        bool(os.getenv("DATABASE_URL") or os.getenv("SQL_DATABASE_URI")),
-    )
+    logger.info("RAG_ENABLED=%s", os.getenv("RAG_ENABLED", "true"))
+    logger.info("RAG_EMBED_PROVIDER=%s", os.getenv("RAG_EMBED_PROVIDER", "remote"))
     logger.info("=" * 60)
 
     try:
-        from agents.hermes_host import get_hermes_host
+        from agents.rag_agent import get_rag_agent, is_enabled
 
-        hermes = get_hermes_host()
-        logger.info("Hermes host readiness: %s", hermes.readiness())
+        if is_enabled():
+            rag = get_rag_agent()
+            logger.info("RAG readiness: %s", rag.readiness())
+        else:
+            logger.warning("RAG_ENABLED=false at startup")
     except Exception:
         logger.exception(
-            "Hermes host init failed at startup — API starts; /ready may return 503"
+            "RAG init failed at startup — API starts; /ready may return 503"
         )
 
     import uvicorn

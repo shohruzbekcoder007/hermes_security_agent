@@ -1,12 +1,9 @@
 """
-FastAPI — Variant 2 Hermes host + SQL tool (+ additive document RAG).
+FastAPI — document RAG only (Chroma + embeddings).
 
-  Open WebUI → Gateway → POST /v1/chat
-       → Hermes host (context/memory)
-            → tool sql_ask  → LangGraph SQL agent → PostgreSQL
-            → tool docs_ask → RAG agent → Chroma (optional)
-
-  Direct RAG: POST /v1/docs/chat
+  POST /v1/chat       → RAG Q&A (gateway-compatible)
+  POST /v1/docs/chat  → same RAG path
+  POST /v1/docs/reindex
 """
 
 from __future__ import annotations
@@ -26,16 +23,16 @@ logger = logging.getLogger("app")
 
 
 class ChatRequest(BaseModel):
-    """Hermes-compatible chat body (gateway Open WebUI platform)."""
+    """Gateway-compatible chat body."""
 
     message: str = Field(..., min_length=1, description="User question")
     session_id: Optional[str] = Field(
         default=None,
-        description="Multi-turn session id (Hermes host memory)",
+        description="Optional client correlation id (RAG is stateless)",
     )
     reset_session: bool = Field(
         default=False,
-        description="Clear Hermes host session history",
+        description="Ignored — RAG has no session memory",
     )
 
 
@@ -47,19 +44,20 @@ class ChatResponse(BaseModel):
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
     retryable: Optional[bool] = None
-    tools_called: Optional[list[dict[str, Any]]] = None
-    tool_call_count: Optional[int] = None
+    sources: Optional[list[dict[str, Any]]] = None
     agents_used: Optional[list[str]] = None
     mode: Optional[str] = None
     backend: Optional[str] = None
-    employee_count: Optional[int] = None
+    embed_provider: Optional[str] = None
+    embed_model: Optional[str] = None
+    embed_dim: Optional[int] = None
 
 
 class DocsChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="Document question")
     session_id: Optional[str] = Field(
         default=None,
-        description="Optional client correlation id (RAG is stateless in v1)",
+        description="Optional client correlation id (RAG is stateless)",
     )
 
 
@@ -108,14 +106,31 @@ def _check_bearer(
         )
 
 
+def _run_rag_chat(message: str, session_id: Optional[str]) -> dict[str, Any]:
+    from agents.rag_agent import get_rag_agent, is_enabled
+
+    if not is_enabled():
+        return {
+            "success": False,
+            "response": None,
+            "session_id": session_id,
+            "error": "RAG disabled (RAG_ENABLED=false)",
+            "error_code": "disabled",
+            "sources": [],
+        }
+    rag = get_rag_agent()
+    result = rag.chat(message)
+    result["session_id"] = session_id
+    return result
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=os.getenv("APP_NAME", "ai-agents"),
+        title=os.getenv("APP_NAME", "hermes_security_agent"),
         version=__version__,
         description=(
-            "Variant 2: Hermes host agent + sql_ask tool → LangGraph SQL agent; "
-            "optional docs_ask / POST /v1/docs/* document RAG (Chroma). "
-            "Open WebUI gateway compatible (POST /v1/chat)."
+            "Document RAG agent (Chroma). "
+            "POST /v1/chat and POST /v1/docs/chat for Q&A over data/docs."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -131,21 +146,15 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
-        logger.info("Starting Hermes-host SQL service v%s", __version__)
-        try:
-            from agents.hermes_host import get_hermes_host
-
-            host = get_hermes_host()
-            logger.info("Hermes host readiness: %s", host.readiness())
-        except Exception:
-            logger.exception("Hermes host init failed — /ready may be 503")
-        # RAG must never crash the process (Chroma can raise Rust PanicException).
+        logger.info("Starting RAG service v%s", __version__)
         try:
             from agents.rag_agent import get_rag_agent, is_enabled as rag_enabled
 
             if rag_enabled():
                 rag = get_rag_agent()
                 logger.info("RAG readiness: %s", rag.readiness())
+            else:
+                logger.warning("RAG_ENABLED=false — document endpoints disabled")
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -156,32 +165,13 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {"status": "ok", "service": os.getenv("APP_NAME", "ai-agents")}
+        return {
+            "status": "ok",
+            "service": os.getenv("APP_NAME", "hermes_security_agent"),
+        }
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
-        from agents.hermes_host import get_hermes_host
-
-        host = get_hermes_host()
-        if not host.ready:
-            host.initialize()
-        rd = host.readiness()
-        if not rd.get("ready"):
-            raise HTTPException(
-                status_code=503,
-                detail={"status": "not_ready", "host": rd},
-            )
-        return {"status": "ready", "host": rd}
-
-    @app.get("/v1/self-improve")
-    def self_improve_stats() -> dict[str, Any]:
-        """Inspect the global self-improving recipe store (learned SQL patterns)."""
-        from agents import self_improve
-
-        return self_improve.stats()
-
-    @app.get("/v1/docs/ready")
-    def docs_ready() -> dict[str, Any]:
         from agents.rag_agent import get_rag_agent, is_enabled
 
         if not is_enabled():
@@ -200,17 +190,22 @@ def create_app() -> FastAPI:
             )
         return {"status": "ready", "rag": rd}
 
+    @app.get("/v1/docs/ready")
+    def docs_ready() -> dict[str, Any]:
+        return ready()
+
     @app.get("/v1/docs/info")
     def docs_info() -> dict[str, Any]:
         from agents.rag_agent import get_rag_agent, is_enabled
 
         rag = get_rag_agent()
         return {
-            "service": os.getenv("APP_NAME", "ai-agents"),
+            "service": os.getenv("APP_NAME", "hermes_security_agent"),
             "version": __version__,
-            "design": "rag-chroma",
+            "design": "rag-only",
             "enabled": is_enabled(),
             "docs_chat_path": "/v1/docs/chat",
+            "chat_path": "/v1/chat",
             "reindex_path": "/v1/docs/reindex",
             "rag": rag.readiness(),
         }
@@ -245,26 +240,14 @@ def create_app() -> FastAPI:
         body: DocsChatRequest,
         _: None = Depends(_check_bearer),
     ) -> DocsChatResponse:
-        """Direct document RAG (bypasses Hermes host)."""
-        from agents.rag_agent import get_rag_agent, is_enabled
-
-        if not is_enabled():
-            return DocsChatResponse(
-                success=False,
-                response=None,
-                session_id=body.session_id,
-                error="RAG disabled (RAG_ENABLED=false)",
-                error_code="disabled",
-                sources=[],
-            )
+        """Document RAG Q&A."""
         try:
-            rag = get_rag_agent()
             logger.info(
                 "POST /v1/docs/chat msg_len=%d preview=%r",
                 len(body.message or ""),
                 (body.message or "")[:80],
             )
-            result = rag.chat(body.message)
+            result = _run_rag_chat(body.message, body.session_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("docs chat failed: %s", exc, exc_info=True)
             return DocsChatResponse(
@@ -296,44 +279,28 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/info")
     def info() -> dict[str, Any]:
-        from agents.hermes_host import get_hermes_host
+        from agents.rag_agent import get_rag_agent, is_enabled as rag_enabled
 
-        host = get_hermes_host()
-        rd = host.readiness()
-        rag_rd: dict[str, Any] = {}
+        rag_rd: dict[str, Any] = {"enabled": rag_enabled()}
         try:
-            from agents.rag_agent import get_rag_agent, is_enabled as rag_enabled
-
-            rag_rd = {
-                "enabled": rag_enabled(),
-                "path": "/v1/docs/chat",
-                "tool": "docs_ask",
-                **(
-                    {k: get_rag_agent().readiness().get(k) for k in (
-                        "ready",
-                        "identity",
-                        "chunk_count",
-                        "error",
-                    )}
-                    if rag_enabled()
-                    else {}
-                ),
-            }
+            if rag_enabled():
+                rd = get_rag_agent().readiness()
+                rag_rd.update(
+                    {
+                        k: rd.get(k)
+                        for k in ("ready", "identity", "chunk_count", "error")
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
-            rag_rd = {"enabled": False, "error": str(exc)}
+            rag_rd["error"] = str(exc)
         return {
-            "service": os.getenv("APP_NAME", "ai-agents"),
+            "service": os.getenv("APP_NAME", "hermes_security_agent"),
             "version": __version__,
-            "design": "hermes-host-sql-tool",
-            "variant": 2,
-            "architecture": rd.get("architecture"),
-            "backend": rd.get("backend"),
+            "design": "rag-only",
             "gateway_compatible": True,
-            "hermes_chat_path": "/v1/chat",
-            "tool": "sql_ask",
-            "inner_sql": rd.get("sql_agent"),
-            "ready": host.ready,
-            "model": rd.get("model"),
+            "chat_path": "/v1/chat",
+            "docs_chat_path": "/v1/docs/chat",
+            "ready": bool(rag_rd.get("ready")),
             "rag": rag_rd,
         }
 
@@ -342,30 +309,22 @@ def create_app() -> FastAPI:
         body: ChatRequest,
         _: None = Depends(_check_bearer),
     ) -> ChatResponse:
-        """Gateway entry: Hermes host keeps context; SQL via sql_ask tool."""
-        from agents.hermes_host import get_hermes_host
-
+        """Gateway entry: document RAG Q&A."""
         try:
-            host = get_hermes_host()
             logger.info(
-                "POST /v1/chat session_id=%r reset=%s msg_len=%d msg_preview=%r",
+                "POST /v1/chat session_id=%r msg_len=%d preview=%r",
                 body.session_id,
-                body.reset_session,
                 len(body.message or ""),
                 (body.message or "")[:80],
             )
-            result = host.chat(
-                body.message,
-                session_id=body.session_id,
-                reset_session=body.reset_session,
-            )
+            result = _run_rag_chat(body.message, body.session_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("chat endpoint failed: %s", exc, exc_info=True)
             return ChatResponse(
                 success=False,
                 response=None,
                 session_id=body.session_id,
-                error="Ichki server xatosi. Iltimos keyinroq urinib ko'ring.",
+                error="Ichki server xatosi (RAG). Iltimos keyinroq urinib ko'ring.",
                 error_code="internal",
                 error_detail=str(exc)[:500],
                 retryable=True,
@@ -373,16 +332,18 @@ def create_app() -> FastAPI:
         return ChatResponse(
             success=bool(result.get("success")),
             response=result.get("response"),
-            session_id=result.get("session_id") or body.session_id,
+            session_id=body.session_id,
             error=result.get("error"),
             error_code=result.get("error_code"),
             error_detail=result.get("error_detail"),
             retryable=result.get("retryable"),
-            tools_called=result.get("tools_called"),
-            tool_call_count=result.get("tool_call_count"),
+            sources=result.get("sources"),
             agents_used=result.get("agents_used"),
             mode=result.get("mode"),
             backend=result.get("backend"),
+            embed_provider=result.get("embed_provider"),
+            embed_model=result.get("embed_model"),
+            embed_dim=result.get("embed_dim"),
         )
 
     return app

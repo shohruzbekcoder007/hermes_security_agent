@@ -1,11 +1,9 @@
-"""Agent package — Variant 2 Hermes host + LangGraph SQL tool."""
+"""Agent package — document RAG only."""
 
-from agents.hermes_host import HermesHostService, get_hermes_host
-from agents.sql_agent import SQLAgentService, get_sql_agent
+from agents.rag_agent import RAGAgentService, get_rag_agent, is_enabled
 
 __all__ = [
-    "HermesHostService",
-    "get_hermes_host",
-    "SQLAgentService",
-    "get_sql_agent",
+    "RAGAgentService",
+    "get_rag_agent",
+    "is_enabled",
 ]

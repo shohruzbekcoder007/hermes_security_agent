@@ -1,145 +1,76 @@
-# Variant 2 — Hermes host + SQL tool (LangGraph) + document RAG
+# hermes_security_agent — document RAG only
 
 ```text
-Open WebUI → Gateway → POST /v1/chat
-     → Hermes host agent  (conversation + memory)
-          → tool: sql_ask
-               → LangGraph / LangChain SQL agent → PostgreSQL
-          → tool: docs_ask
-               → RAG agent → Chroma (PDF / Word / FAQ)
-
-Direct RAG (no host): POST /v1/docs/chat
+Client → POST /v1/chat  (or /v1/docs/chat)
+       → RAG agent → Chroma (PDF / Word / FAQ) + LLM answer
 ```
 
-## Why this design
-
-- **Hermes host** owns multi-turn context / session history.
-- **SQL stack** stays LangGraph (schema + readonly SQL tools).
-- **RAG** is a separate agent for policies/PDF/Word; exposed as `docs_ask` + `/v1/docs/*`.
-- Gateway keeps `HERMES_GIS_BASE_URL=http://host.docker.internal:8080`.
-
-If the `hermes-agent` package is missing, **hermes_lite** runs the same pattern
-(outer tool-calling host + `sql_ask` / `docs_ask`).
+SQL, Hermes host, and self-improve stacks have been removed. Only the document RAG agent remains.
 
 ## Configure
 
 ```env
+APP_PORT=9000
 OPENAI_API_KEY=...
-DATABASE_URL=postgresql://...
 LLM_MODEL=gpt-4.1
-HERMES_SKIP_MEMORY=false
-HERMES_ENABLED_TOOLSETS=sql_bridge,docs_bridge
 
-# Document RAG + embeddings
 RAG_ENABLED=true
 RAG_DOCS_DIR=./data/docs
 RAG_CHROMA_ROOT=./data/rag/chroma
 
-# Preferred: remote embedding-service (sibling d:\GROK\embedding-service)
+# Preferred: remote embedding-service
 RAG_EMBED_PROVIDER=remote
 RAG_EMBED_URL=http://host.docker.internal:8090
-# RAG_EMBED_BEARER_TOKEN=
 
-# In-process fallback (no separate service):
+# In-process fallback:
 # RAG_EMBED_PROVIDER=openai
 # RAG_EMBED_MODEL=text-embedding-3-small
 # Local bge-m3: RAG_EMBED_PROVIDER=local + requirements-rag-local.txt
 ```
 
+## Run
+
+```bash
+# local
+python -m app.main
+
+# docker
+docker compose up -d --build
+```
+
+Listens on **port 9000** by default.
+
 ## API
 
 | Method | Path | Role |
 |--------|------|------|
-| POST | `/v1/chat` | Host chat (`session_id` for memory) |
-| GET | `/ready` | Host + inner SQL ready |
-| GET | `/v1/info` | Architecture metadata (+ `rag` summary) |
-| GET | `/v1/self-improve` | Learned SQL-pattern store stats |
-| POST | `/v1/docs/chat` | Document RAG Q&A |
+| POST | `/v1/chat` | Document RAG Q&A (gateway-compatible) |
+| POST | `/v1/docs/chat` | Same RAG path |
 | POST | `/v1/docs/reindex` | Rebuild Chroma for current embed identity |
+| GET | `/ready` | RAG ready |
+| GET | `/health` | Liveness |
+| GET | `/v1/info` | Service metadata |
 | GET | `/v1/docs/ready` | RAG ready |
 | GET | `/v1/docs/info` | RAG config + stats |
 | GET | `/v1/docs/files` | Files under `RAG_DOCS_DIR` |
 
-## Document RAG + Document Intelligence
+## Document workflow
 
 1. Put PDF / DOCX / MD / TXT into `data/docs/` (Docker volume `./data`).
-2. `POST /v1/docs/reindex` (same bearer as chat if `API_BEARER_TOKEN` set).
-3. Ask via `POST /v1/docs/chat` or host chat (`docs_ask`).
-
-On reindex the app:
-
-- detects structure (bob/modda / chapter/article) when present;
-- stores **document profiles** (counts, type) + TOC chunks;
-- indexes article-level chunks with rich metadata (`article_num`, `chapter_num`, `heading_path`);
-- falls back to semantic chunks for unstructured files.
-
-Query routing:
-
-| Savol | Mode |
-|--------|------|
-| Nechta bob/modda? | `structured_counts` (profile stats) |
-| 15-modda qaysi bobda? | `hierarchy` + metadata |
-| oddiy mazmun | hybrid semantic (embedding-service) |
-
-**Embedding switch:** change model on **embedding-service** env (or local `RAG_EMBED_*`), then **full reindex** here (`POST /v1/docs/reindex`).  
-`index_key` comes from the embed service (`provider__model__d{dim}`); Chroma paths never mix dimensions.
-
-```bash
-# Terminal 1 — embedding service
-cd ../embedding-service && python -m app.main
-
-# Terminal 2 — this app (after RAG_EMBED_PROVIDER=remote)
-curl -X POST http://127.0.0.1:8080/v1/docs/reindex
-```
-
-## Self-improving (global recipe store)
-
-The SQL agent learns across all users/sessions of this instance:
-
-- Every **successful** question is stored with the **executed SQL** as a
-  reusable *recipe* (`data/self_improve.json`, mounted volume).
-- On a new question, the **top-k** most similar recipes are injected into the
-  SQL prompt as few-shot examples — so working SQL / multi-script term
-  mappings are reused instead of re-derived.
-- **No prompt bloat**: only top-k are injected; the store is bounded
-  (`SELF_IMPROVE_MAX_RECIPES`, least-used pruned) — curation, not accumulation.
-- **Leak-safe & global**: stores the SQL *technique*, never result rows; one
-  shared store benefits everyone (single shared database).
-
-Backend-agnostic — works under `hermes`, `hermes_lite`, or plain LangGraph.
-
-```env
-SELF_IMPROVE_ENABLED=true
-SELF_IMPROVE_STORE_PATH=./data/self_improve.json
-SELF_IMPROVE_TOP_K=3
-SELF_IMPROVE_MIN_SCORE=0.18
-SELF_IMPROVE_MAX_RECIPES=500
-```
-
-## Run
-
-```bash
-docker compose build
-docker compose up -d
-```
+2. `POST /v1/docs/reindex` (bearer required if `API_BEARER_TOKEN` set).
+3. Ask via `POST /v1/chat` or `POST /v1/docs/chat`.
 
 ## Layout
 
 ```text
 agents/
-  hermes_host.py      # host agent (Hermes or hermes_lite)
-  sql_bridge_tool.py  # sql_ask tool
-  sql_agent.py        # LangGraph SQL implementation
-  embeddings.py       # get_embeddings() from env only
-  rag_agent.py        # PDF/Word → Chroma → answer
-  rag_bridge_tool.py  # docs_ask tool
-  self_improve.py     # global SQL recipe store
-plugins/sql-bridge/   # Hermes plugin registration
+  rag_agent.py       # document RAG
+  embeddings.py      # remote / openai / local embeddings
+  doc_structure.py   # structure detection (bob/modda, etc.)
+app/
+  api.py             # FastAPI
+  main.py            # uvicorn entry (port 9000)
 prompts/
-  hermes_coordinator.md   # host system prompt
-  sql_agent_system.md     # inner SQL agent prompt
-  rag_agent_system.md     # document RAG prompt
-data/
-  docs/               # drop PDF/DOCX/MD/TXT here
-  rag/chroma/         # per-model Chroma indexes
+  rag_agent_system.md
+data/docs/           # source documents
 ```

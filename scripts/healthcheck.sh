@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-URL="${HEALTHCHECK_URL:-http://127.0.0.1:8080/health}"
+URL="${HEALTHCHECK_URL:-http://127.0.0.1:9000/health}"
 TIMEOUT="${HEALTHCHECK_TIMEOUT_SECONDS:-5}"
 
 if command -v curl >/dev/null 2>&1; then
