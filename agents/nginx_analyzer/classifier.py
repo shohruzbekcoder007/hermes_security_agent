@@ -25,6 +25,10 @@ from agents.nginx_analyzer.patterns import (
     is_security_path,
     match_rule,
 )
+from agents.nginx_analyzer.security_matrix import (
+    SecurityMatrix,
+    classify_entry_for_matrix,
+)
 
 _MAX_EXAMPLES = 3
 _NORMALIZE_NUM = re.compile(r"\b\d+\b")
@@ -126,6 +130,7 @@ def analyze_entries(
     files: Optional[list[str]] = None,
 ) -> AnalysisResult:
     groups: OrderedDict[str, EventGroup] = OrderedDict()
+    matrix = SecurityMatrix()
     total = 0
     parsed = 0
 
@@ -168,6 +173,23 @@ def analyze_entries(
         # Keep higher confidence if duplicate profiles disagree
         g.confidence = max(g.confidence, profile.confidence)
 
+        # Rasmiy kiberhujumlar matritsasi
+        attack_type, is_outage, is_crit = classify_entry_for_matrix(
+            entry,
+            is_security_scan=profile.is_security_scan,
+            is_blocked_attack=profile.is_blocked_attack,
+            is_infrastructure=profile.is_infrastructure,
+            category=profile.category,
+        )
+        if attack_type:
+            matrix.add_attack(attack_type)
+            if profile.is_blocked_attack or profile.is_security_scan:
+                matrix.blocked_security_events += 1
+        if is_outage:
+            matrix.corporate_outages += 1
+        if is_crit:
+            matrix.critical_infra_incidents += 1
+
     # Merge groups with same category for executive rollup? Keep fine-grained groups
     # but also produce category rollup in report. For API events list, merge by category
     # for cleaner reports when fingerprints explode.
@@ -179,6 +201,7 @@ def analyze_entries(
         skipped_lines=max(0, total - parsed),
         files=list(files or []),
         groups=merged,
+        security_matrix=matrix.to_dict(),
     )
     _compute_stats(result)
     return result

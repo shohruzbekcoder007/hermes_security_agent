@@ -95,6 +95,9 @@ def render_report(result: AnalysisResult) -> str:
     a(_score_label(result.health_score))
     a("")
 
+    # Rasmiy kiberhujumlar jadvali (talab qilingan format)
+    lines.extend(_render_security_matrix_table(result))
+
     for title, sev in [
         ("Kritik", Severity.CRITICAL),
         ("Yuqori", Severity.HIGH),
@@ -179,6 +182,104 @@ def _score_label(score: int) -> str:
     if score >= 25:
         return "_Holat: Yomon — kritik/yuqori muammolar xizmatga ta'sir qilishi mumkin._"
     return "_Holat: Kritik — zudlik bilan incident response tavsiya etiladi._"
+
+
+def _render_security_matrix_table(result: AnalysisResult) -> list[str]:
+    """
+    Rasmiy jadval:
+      № | Tarmoqdagi kiberhujumlar | Muhim infratuzilma | Korporativ uzilish |
+        | Javob natijalari | Eslatma
+    """
+    from agents.nginx_analyzer.security_matrix import (
+        ATTACK_TYPES,
+        response_for_attack_row,
+        response_for_total,
+    )
+
+    lines: list[str] = []
+    a = lines.append
+
+    a("## Kiberhujumlar va hodisalar jadvali")
+    a("")
+    a(
+        "Axborot uzatish tarmoqlari va infratuzilmadagi kiberxavfsizlik hodisalari "
+        "(log dalillari asosida)."
+    )
+    a("")
+
+    sm = result.security_matrix or {}
+    counts = sm.get("attack_counts") or {}
+    outages = int(sm.get("corporate_outages") or 0)
+    crit = int(sm.get("critical_infra_incidents") or 0)
+    # Ensure all types present
+    for t in ATTACK_TYPES:
+        counts.setdefault(t, 0)
+
+    treated_blocked = crit <= 0
+
+    # Header — markdown table (uzun sarlavhalar)
+    a(
+        "| № | Axborot uzatish tarmoqlaridagi kiberhujumlar, "
+        "hodisalar va boshqalar soni (shu jumladan tarkibiy bo'linmalarda) | "
+        "Axborotlashtirish va muhim axborot infratuzilmasi obyektlarida "
+        "kiberxavfsizlik hodisalari soni (shu jumladan tarkibiy bo'linmalarda) | "
+        "Korporativ tarmoqdagi baxtsiz hodisa va uzilishlar soni | "
+        "Javob natijalari | Eslatma |"
+    )
+    a("|:---:|:---|:---:|:---:|:---|:---|")
+
+    total = 0
+    for i, t in enumerate(ATTACK_TYPES, start=1):
+        cnt = int(counts.get(t, 0) or 0)
+        total += cnt
+        col2 = f"{cnt} - {t}"
+        # Ustun 3–4: logda alohida dalil bo'lmasa «-» (namuna jadval kabi)
+        col3 = "-"
+        col4 = "-"
+        # 0 ta → «Hodisa qayd etilmadi»; >0 va bloklangan skaner/WAF → firewall matni
+        col5 = response_for_attack_row(cnt, treated_as_blocked=treated_blocked)
+        col6 = ""
+        a(f"| {i} | {col2} | {col3} | {col4} | {col5} | {col6} |")
+
+    total_resp = response_for_total(
+        total,
+        corporate_outages=outages,
+        critical_infra_incidents=crit,
+        all_security_treated_blocked=treated_blocked,
+    )
+    # Jami
+    a(
+        f"| **Jami** | **{total}** | **-** | **-** | "
+        f"**{total_resp}** |  |"
+    )
+    a("")
+
+    # Qo'shimcha: agar korporativ uzilishlar sanalsa, izoh
+    if outages or crit:
+        a("**Jadval izohi (batafsil log tahlilidan):**")
+        if crit:
+            a(
+                f"- Muhim infratuzilma kiberxavfsizlik hodisalari (alohida dalil): "
+                f"**{crit}**"
+            )
+        if outages:
+            a(
+                f"- Korporativ tarmoq / infratuzilma uzilish belgilari (upstream, "
+                f"disk, xotira, worker crash va hokazo): **{outages}**"
+            )
+        a(
+            "- Asosiy jadvalda 3–4-ustunlar rasmiy hisobot shabloni bo'yicha "
+            "«-» qoldirilgan; batafsil topilmalar pastda."
+        )
+        a("")
+
+    a(
+        f"_Jami tasniflangan kiberhujum urinishlari: **{total}**. "
+        f"Bloklangan xavfsizlik hodisalari: "
+        f"**{sm.get('blocked_security_events', result.blocked_attacks + result.security_events)}**._"
+    )
+    a("")
+    return lines
 
 
 def _top_recommendations(result: AnalysisResult, limit: int = 8) -> list[str]:

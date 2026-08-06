@@ -156,6 +156,8 @@ class AnalysisResult:
     llm_overall_assessment: str = ""
     llm_top_actions: list[str] = field(default_factory=list)
     llm_meta: dict[str, Any] = field(default_factory=dict)
+    # Rasmiy kiberhujumlar jadvali (attack type counts + response)
+    security_matrix: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -174,6 +176,7 @@ class AnalysisResult:
             "unknown_events": self.unknown_count,
             "overall_health_score": self.health_score,
             "events": [g.to_dict() for g in self.groups],
+            "security_matrix": self.security_matrix,
             "report_markdown": self.report_markdown,
             "errors": self.errors,
             "llm_used": self.llm_used,
